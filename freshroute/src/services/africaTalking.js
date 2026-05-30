@@ -113,8 +113,45 @@ async function sendAirtime({ phoneNumber, amount, currencyCode, shipmentId, reas
   return { status, result };
 }
 
-async function sendWhatsApp({ to, message, shipmentId, reason }) {
-  const result = await callBackend('/whatsapp/send', { to, message });
+async function sendWhatsApp({ to, message, shipmentId, reason, waNumber }) {
+  const sender = waNumber || config.whatsappSender;
+
+  if (!config.whatsappEnabled) {
+    const skipped = { ok: false, skipped: true, error: 'WHATSAPP_ENABLED=false' };
+    logActivity({
+      shipmentId,
+      product: 'whatsapp',
+      recipientPhone: Array.isArray(to) ? to.join(',') : to,
+      summary: message.slice(0, 120),
+      status: 'skipped',
+      rawResponse: skipped,
+      reason,
+    });
+    return { status: 'skipped', result: skipped };
+  }
+
+  if (!sender) {
+    const missing = {
+      ok: false,
+      error: 'Set AT_WHATSAPP_SENDER in AT backend .env (WhatsApp Business number from dashboard)',
+    };
+    logActivity({
+      shipmentId,
+      product: 'whatsapp',
+      recipientPhone: Array.isArray(to) ? to.join(',') : to,
+      summary: message.slice(0, 120),
+      status: 'failed',
+      rawResponse: missing,
+      reason,
+    });
+    return { status: 'failed', result: missing };
+  }
+
+  const result = await callBackend('/whatsapp/send', {
+    to,
+    message,
+    waNumber: sender,
+  });
   const status = config.mockAt ? 'mocked' : result.ok ? 'sent' : 'failed';
   logActivity({
     shipmentId,

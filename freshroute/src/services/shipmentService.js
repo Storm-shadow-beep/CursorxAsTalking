@@ -20,8 +20,12 @@ const SMS = {
     `FreshRoute CRITICAL: ${product} shipment ${id} near ${loc}. Spoilage ${rate}%. Rescue broadcast started.`,
   buyerRescueAssigned: (id, product, backupName) =>
     `FreshRoute: Rescue assigned for ${id} (${product}). Backup driver: ${backupName}.`,
-  airtimeThanks: (id) =>
-    `FreshRoute: Thanks for completing shipment ${id} updates. Airtime reward sent.`,
+  buyerBreakdown: (id, product, driverName, loc) =>
+    `FreshRoute Alert: Your ${product} shipment ${id} has a BREAKDOWN. Driver ${driverName} reported near ${loc}. We are coordinating rescue.`,
+  buyerBreakdownWhatsApp: (id, product, driverName, loc) =>
+    `🚨 *FreshRoute Breakdown*\n\nShipment: *${id}*\nProduct: ${product}\nDriver: ${driverName}\nLocation: ${loc}\n\nWe are coordinating rescue. Reply if you need updates.`,
+  airtimeThanks: (id, amount, currency) =>
+    `FreshRoute: Delivery ${id} completed. Airtime reward of ${amount} ${currency} has been sent. Thank you.`,
   rescueBroadcast: (origin, product, dest) =>
     `FreshRoute Rescue: Backup needed near ${origin} for ${product} to ${dest}. Dial USSD to accept.`,
 };
@@ -220,8 +224,47 @@ async function reportLateWithSpoilage(shipment, delayReason, reportedLocation) {
   );
 }
 
+async function notifyBuyerBreakdown(shipment, locationLabel) {
+  const loc = locationLabel || shipment.normalizedLocation || shipment.origin || 'en route';
+  const smsMessage = SMS.buyerBreakdown(
+    shipment.id,
+    shipment.productType,
+    shipment.driverName,
+    loc
+  );
+  const whatsappMessage = SMS.buyerBreakdownWhatsApp(
+    shipment.id,
+    shipment.productType,
+    shipment.driverName,
+    loc
+  );
+
+  await at.sendSms({
+    to: shipment.buyerPhone,
+    message: smsMessage,
+    shipmentId: shipment.id,
+    reason: 'buyer_breakdown',
+  });
+  await at.sendWhatsApp({
+    to: shipment.buyerPhone,
+    message: whatsappMessage,
+    shipmentId: shipment.id,
+    reason: 'buyer_breakdown_whatsapp',
+  });
+  addEvent(
+    shipment.id,
+    'breakdown',
+    'Driver reported breakdown — customer notified',
+    shipment.driverPhone,
+    { location: loc, buyerPhone: shipment.buyerPhone }
+  );
+  addEvent(shipment.id, 'buyer_alerted', 'Buyer breakdown SMS/WhatsApp', shipment.buyerPhone);
+}
+
 async function reportBreakdown(shipment) {
-  return reportLateWithSpoilage(shipment, 'breakdown', shipment.normalizedLocation || 'Kibaha');
+  const location = shipment.normalizedLocation || shipment.origin || 'Kibaha';
+  await notifyBuyerBreakdown(shipment, location);
+  return reportLateWithSpoilage(shipment, 'breakdown', location);
 }
 
 async function completeDelivery(shipment, driverPhone) {
@@ -231,7 +274,10 @@ async function completeDelivery(shipment, driverPhone) {
   shipment.updatedAt = new Date().toISOString();
   addEvent(shipment.id, 'delivered', 'Delivery completed', driverPhone);
 
-  if (shipment.checkInCount > 0) {
+  const canReward =
+    !config.airtimeRequiresCheckin || (shipment.checkInCount || 0) > 0;
+
+  if (canReward) {
     await at.sendAirtime({
       phoneNumber: driverPhone,
       amount: config.airtimeRewardAmount,
@@ -241,11 +287,27 @@ async function completeDelivery(shipment, driverPhone) {
     });
     await at.sendSms({
       to: driverPhone,
-      message: SMS.airtimeThanks(shipment.id),
+      message: SMS.airtimeThanks(
+        shipment.id,
+        config.airtimeRewardAmount,
+        config.airtimeCurrency
+      ),
       shipmentId: shipment.id,
       reason: 'reward_confirmation',
     });
-    addEvent(shipment.id, 'airtime_reward', 'Airtime reward queued', driverPhone);
+    addEvent(
+      shipment.id,
+      'airtime_reward',
+      `Airtime ${config.airtimeRewardAmount} ${config.airtimeCurrency} sent to driver`,
+      driverPhone
+    );
+  } else {
+    addEvent(
+      shipment.id,
+      'airtime_skipped',
+      'No check-in before delivery — airtime not sent (set AIRTIME_REQUIRES_CHECKIN=false for sandbox)',
+      driverPhone
+    );
   }
 
   return shipment;
@@ -262,6 +324,7 @@ module.exports = {
   createShipment,
   applySpoilageAndAlerts,
   reportLateWithSpoilage,
+  notifyBuyerBreakdown,
   reportBreakdown,
   completeDelivery,
   recordCheckIn,

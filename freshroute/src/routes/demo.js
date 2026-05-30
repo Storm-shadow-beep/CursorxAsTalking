@@ -11,6 +11,29 @@ router.post('/reset', (req, res) => {
   res.json({ ok: true, message: 'Demo data reset' });
 });
 
+/** Test SMS + WhatsApp breakdown alerts to customer number (no USSD) */
+router.post('/test-breakdown-alerts', async (req, res, next) => {
+  try {
+    const shipment = getShipment(req.body.shipmentId) || state.shipments[0];
+    if (!shipment) {
+      return res.status(400).json({
+        error: 'No shipment. Run link-sandbox-pair first.',
+      });
+    }
+    const loc = req.body.location || shipment.origin || 'Kibaha';
+    await shipmentService.notifyBuyerBreakdown(shipment, loc);
+    res.json({
+      ok: true,
+      message: 'Breakdown SMS + WhatsApp sent to buyer',
+      buyerPhone: shipment.buyerPhone,
+      shipmentId: shipment.id,
+      checkActivity: 'GET /api/activity?product=whatsapp',
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
 function driverPhoneForDemo(override) {
   return (
     override ||
@@ -20,29 +43,59 @@ function driverPhoneForDemo(override) {
   );
 }
 
-/** Call this with the exact number you dial USSD from (sandbox / your SIM) */
-router.post('/link-sandbox-phone', async (req, res, next) => {
+function buyerPhoneForDemo(override) {
+  return (
+    override ||
+    process.env.SANDBOX_BUYER_PHONE ||
+    process.env.DEFAULT_RECIPIENT ||
+    sampleTomatoShipment().buyerPhone
+  );
+}
+
+function buildSandboxPayload(body = {}) {
+  const payload = sampleTomatoShipment();
+  payload.driverPhone = driverPhoneForDemo(body.driverPhone || body.phoneNumber);
+  payload.buyerPhone = buyerPhoneForDemo(body.buyerPhone || body.customerPhone);
+  payload.driverName = body.driverName || 'Sandbox Driver';
+  payload.buyerName = body.buyerName || 'Sandbox Customer';
+  return payload;
+}
+
+async function linkSandboxPair(req, res, next) {
   try {
-    const phoneNumber = driverPhoneForDemo(req.body.phoneNumber);
-    if (!phoneNumber) {
-      return res.status(400).json({ error: 'phoneNumber required' });
+    const body = { ...req.body };
+    body.driverPhone = body.driverPhone || body.phoneNumber;
+    const payload = buildSandboxPayload(body);
+    if (!payload.driverPhone || !payload.buyerPhone) {
+      return res.status(400).json({
+        error: 'driverPhone and buyerPhone required (or set SANDBOX_DRIVER_PHONE / SANDBOX_BUYER_PHONE in .env)',
+      });
     }
     resetStore();
-    const payload = sampleTomatoShipment();
-    payload.driverPhone = phoneNumber;
-    payload.driverName = req.body.driverName || 'Sandbox Driver';
     const shipment = await shipmentService.createShipment(payload);
     res.json({
       ok: true,
-      message: 'Shipment linked to your sandbox phone. Dial *384*28480# now.',
-      phoneNumber,
+      message: 'Sandbox pair linked. Driver dials USSD; customer receives breakdown alerts.',
+      driverPhone: payload.driverPhone,
+      buyerPhone: payload.buyerPhone,
+      airtimeReward: `${process.env.AIRTIME_REWARD_AMOUNT || '500'} ${process.env.AIRTIME_CURRENCY || 'KES'}`,
+      testFlow: {
+        breakdown: 'Driver USSD → 3 (Report breakdown) → SMS to buyerPhone',
+        complete: 'Driver USSD → 4 (Complete delivery) → airtime to driverPhone',
+      },
       shipment,
       ussdServiceCode: process.env.AT_USSD_CODE || '*384*28480#',
     });
   } catch (err) {
     next(err);
   }
-});
+}
+
+/** Link driver + customer sandbox numbers for AT simulator testing */
+router.post('/link-sandbox-pair', linkSandboxPair);
+
+/** Alias: pass phoneNumber as driver; optional buyerPhone */
+router.post('/link-sandbox-phone', linkSandboxPair);
 
 router.post('/load-winning-scenario', async (req, res, next) => {
   try {

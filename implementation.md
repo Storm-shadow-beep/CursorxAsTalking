@@ -151,15 +151,12 @@ That message is from the **telco/AT gateway**, not FreshRoute. It means AT did *
 | Wrong response | **400 JSON** or **HTML** (ngrok warning page) → telco shows generic error |
 
 ```powershell
-# Replace with your sandbox mobile from AT dashboard
-$phone = "+2547XXXXXXXX"
-Invoke-RestMethod -Method POST -Uri http://localhost:3001/api/demo/link-sandbox-phone `
-  -ContentType "application/json" -Body (@{ phoneNumber = $phone } | ConvertTo-Json)
+# Driver (USSD) + customer (breakdown SMS) — use your AT sandbox numbers
+$body = @{ driverPhone = "+255789123456"; buyerPhone = "+254700000001" } | ConvertTo-Json
+Invoke-RestMethod -Method POST -Uri http://localhost:3001/api/demo/link-sandbox-pair `
+  -ContentType "application/json" -Body $body
 
-# Simulate AT callback through ngrok
-Invoke-WebRequest -Method POST -Uri "https://company-impure-spotting.ngrok-free.dev/api/ussd" `
-  -ContentType "application/x-www-form-urlencoded" `
-  -Body "sessionId=test-1&phoneNumber=$([uri]::EscapeDataString($phone))&text="
+# Driver USSD: 3 = breakdown (SMS to buyer), 4 = complete (500 airtime to driver)
 ```
 
 If local works but the phone still fails, check ngrok **4040** for failed requests (502 = FreshRoute not running; 404 = wrong path/port).
@@ -264,9 +261,86 @@ CursorxTalking/
         shipments.js, ussd.js, drivers.js, rescue.js, activity.js, demo.js
 ```
 
-## WhatsApp
+## WhatsApp (including breakdown alerts)
 
-Buyer updates are sent via `POST /whatsapp/send` on the AT backend when risk ≥ watch. Configure `AT_WHATSAPP_API_URL` and `AT_WHATSAPP_SENDER` in the **AT project** `.env`. Failures are logged in `/api/activity` as `failed` without breaking the flow.
+On **USSD option 3 (breakdown)**, the customer (`buyerPhone`) receives:
+
+1. **SMS** — plain text  
+2. **WhatsApp** — formatted message via Africa's Talking Chat API (SDK 0.8+)
+
+### Setup (required for WhatsApp)
+
+1. In [Africa's Talking dashboard](https://account.africastalking.com), open **WhatsApp** and note your **WhatsApp Business number** (sender).
+
+2. In **`said-at/africastalking-demo-api-all/.env`**:
+
+```env
+AT_WHATSAPP_SENDER=+2547XXXXXXXX
+```
+
+Use the exact sender number AT gave you (often Kenya `+254…`).
+
+3. Upgrade AT backend dependencies and restart:
+
+```powershell
+cd F:\important_projects\hackathons\said-at\africastalking-demo-api-all
+npm install
+npm run dev
+```
+
+4. In **`freshroute/.env.local`** (optional, same sender):
+
+```env
+AT_WHATSAPP_SENDER=+2547XXXXXXXX
+WHATSAPP_ENABLED=true
+```
+
+5. Restart FreshRoute.
+
+### Test breakdown → SMS + WhatsApp (simulator / API)
+
+```powershell
+# Link driver + customer sandbox numbers
+$body = @{ driverPhone = "+255789123456"; buyerPhone = "+255123456789" } | ConvertTo-Json
+Invoke-RestMethod -Method POST -Uri http://localhost:3001/api/demo/link-sandbox-pair `
+  -ContentType "application/json" -Body $body
+
+# Option A — USSD: driver dials *384*28480# → press 3 (breakdown)
+
+# Option B — API only (no phone)
+Invoke-RestMethod -Method POST -Uri http://localhost:3001/api/demo/test-breakdown-alerts `
+  -ContentType "application/json" -Body '{}'
+
+# Verify
+Invoke-RestMethod http://localhost:3001/api/activity
+```
+
+Look for two rows on the same shipment:
+
+- `buyer_breakdown` → product `sms`, status `sent`  
+- `buyer_breakdown_whatsapp` → product `whatsapp`, status `sent`  
+
+If WhatsApp shows `failed`, read `rawResponse` — usually missing/wrong `AT_WHATSAPP_SENDER` or WhatsApp not enabled on your AT account.
+
+### AT sandbox simulator notes
+
+- **USSD simulator** uses your **driver** sandbox number.  
+- **SMS** arrives on **buyerPhone** if that number is registered in sandbox.  
+- **WhatsApp** only delivers if the **buyer** number has opted in / is valid for your WhatsApp sandbox channel (check AT WhatsApp test docs).  
+- Both numbers should be real sandbox test numbers from your dashboard, not placeholders like `+255123456789`.
+
+### Direct WhatsApp test (AT backend only)
+
+```powershell
+$body = @{
+  to = "+255123456789"
+  message = "FreshRoute WhatsApp test"
+  waNumber = "+2547XXXXXXXX"
+} | ConvertTo-Json
+
+Invoke-RestMethod -Method POST -Uri http://localhost:3000/whatsapp/send `
+  -ContentType "application/json" -Body $body
+```
 
 ## Next steps for dashboard teammate
 
