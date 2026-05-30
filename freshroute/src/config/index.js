@@ -6,7 +6,14 @@ const root = path.resolve(__dirname, '../..');
 dotenv.config({ path: path.join(root, '.env') });
 dotenv.config({ path: path.join(root, '.env.local'), override: true });
 
+function normalizeCurrency(code) {
+  const c = String(code || 'TZS').toUpperCase().trim();
+  if (c === 'TSH') return 'TZS';
+  return c;
+}
+
 module.exports = {
+  normalizeCurrency,
   port: Number(process.env.FRESHROUTE_PORT) || 3001,
   atBackendUrl: (process.env.AT_BACKEND_URL || 'http://localhost:3000').replace(/\/$/, ''),
   mockAt: process.env.AFRICASTALKING_MOCK === 'true',
@@ -14,7 +21,7 @@ module.exports = {
   sandboxDriverPhone: process.env.SANDBOX_DRIVER_PHONE || '',
   sandboxBuyerPhone: process.env.SANDBOX_BUYER_PHONE || '',
   airtimeRewardAmount: String(process.env.AIRTIME_REWARD_AMOUNT || '500'),
-  airtimeCurrency: process.env.AIRTIME_CURRENCY || 'KES',
+  airtimeCurrency: normalizeCurrency(process.env.AIRTIME_CURRENCY || 'TZS'),
   /** Set AIRTIME_REQUIRES_CHECKIN=true to require USSD check-in before airtime */
   airtimeRequiresCheckin: process.env.AIRTIME_REQUIRES_CHECKIN === 'true',
   whatsappSender: process.env.AT_WHATSAPP_SENDER || '',

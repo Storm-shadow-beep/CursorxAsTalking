@@ -11,6 +11,39 @@ router.post('/reset', (req, res) => {
   res.json({ ok: true, message: 'Demo data reset' });
 });
 
+/** Test real airtime credit to driver (Africa's Talking Airtime API) */
+router.post('/test-airtime-reward', async (req, res, next) => {
+  try {
+    const shipment = getShipment(req.body.shipmentId) || state.shipments[0];
+    if (!shipment) {
+      return res.status(400).json({ error: 'No shipment. Run link-sandbox-pair first.' });
+    }
+    const phone = req.body.phoneNumber || shipment.driverPhone;
+    const at = require('../services/africaTalking');
+    const config = require('../config');
+    const airtime = await at.sendAirtime({
+      phoneNumber: phone,
+      amount: req.body.amount || config.airtimeRewardAmount,
+      currencyCode: req.body.currencyCode || config.airtimeCurrency,
+      shipmentId: shipment.id,
+      reason: 'test_airtime',
+    });
+    res.json({
+      ok: true,
+      credited: airtime.credited,
+      phoneNumber: phone,
+      amount: req.body.amount || config.airtimeRewardAmount,
+      currency: config.airtimeCurrency,
+      message: airtime.credited
+        ? 'Check driver phone balance / AT sandbox. See /api/activity.'
+        : 'Airtime failed — check AT backend .env and sandbox limits.',
+      airtime,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
 /** Test SMS + WhatsApp breakdown alerts to customer number (no USSD) */
 router.post('/test-breakdown-alerts', async (req, res, next) => {
   try {

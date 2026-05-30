@@ -24,8 +24,14 @@ const SMS = {
     `FreshRoute Alert: Your ${product} shipment ${id} has a BREAKDOWN. Driver ${driverName} reported near ${loc}. We are coordinating rescue.`,
   buyerBreakdownWhatsApp: (id, product, driverName, loc) =>
     `🚨 *FreshRoute Breakdown*\n\nShipment: *${id}*\nProduct: ${product}\nDriver: ${driverName}\nLocation: ${loc}\n\nWe are coordinating rescue. Reply if you need updates.`,
-  airtimeThanks: (id, amount, currency) =>
-    `FreshRoute: Delivery ${id} completed. Airtime reward of ${amount} ${currency} has been sent. Thank you.`,
+  airtimeCredited: (id, amount, currency, amountLabel) =>
+    amountLabel
+      ? `FreshRoute: Delivery ${id} done. ${amountLabel} airtime credited to your line. Thank you!`
+      : `FreshRoute: Delivery ${id} done. ${amount} ${currency} airtime credited to your line. Thank you!`,
+  airtimeFailedNotify: (id) =>
+    `FreshRoute: Delivery ${id} recorded. Airtime reward could not be credited yet. Coordinator will follow up.`,
+  deliveryComplete: (id) =>
+    `FreshRoute: Shipment ${id} marked delivered. Thank you.`,
   rescueBroadcast: (origin, product, dest) =>
     `FreshRoute Rescue: Backup needed near ${origin} for ${product} to ${dest}. Dial USSD to accept.`,
 };
@@ -274,40 +280,69 @@ async function completeDelivery(shipment, driverPhone) {
   shipment.updatedAt = new Date().toISOString();
   addEvent(shipment.id, 'delivered', 'Delivery completed', driverPhone);
 
+  const rewardPhone = shipment.driverPhone || driverPhone;
   const canReward =
     !config.airtimeRequiresCheckin || (shipment.checkInCount || 0) > 0;
 
-  if (canReward) {
-    await at.sendAirtime({
-      phoneNumber: driverPhone,
-      amount: config.airtimeRewardAmount,
-      currencyCode: config.airtimeCurrency,
-      shipmentId: shipment.id,
-      reason: 'delivery_reward',
-    });
+  if (!canReward) {
+    addEvent(
+      shipment.id,
+      'airtime_skipped',
+      'No check-in before delivery — airtime not sent (set AIRTIME_REQUIRES_CHECKIN=false)',
+      rewardPhone
+    );
     await at.sendSms({
-      to: driverPhone,
-      message: SMS.airtimeThanks(
+      to: rewardPhone,
+      message: SMS.deliveryComplete(shipment.id),
+      shipmentId: shipment.id,
+      reason: 'delivery_complete_no_airtime',
+    });
+    return shipment;
+  }
+
+  // 1) Real airtime credit via Africa's Talking API (not SMS-only)
+  const airtime = await at.sendAirtime({
+    phoneNumber: rewardPhone,
+    amount: config.airtimeRewardAmount,
+    currencyCode: config.airtimeCurrency,
+    shipmentId: shipment.id,
+    reason: 'delivery_reward',
+  });
+
+  // 2) SMS only reflects what actually happened
+  if (airtime.credited) {
+    await at.sendSms({
+      to: rewardPhone,
+      message: SMS.airtimeCredited(
         shipment.id,
         config.airtimeRewardAmount,
-        config.airtimeCurrency
+        config.airtimeCurrency,
+        airtime.outcome?.amountLabel
       ),
       shipmentId: shipment.id,
-      reason: 'reward_confirmation',
+      reason: 'airtime_credited_notify',
     });
     addEvent(
       shipment.id,
       'airtime_reward',
-      `Airtime ${config.airtimeRewardAmount} ${config.airtimeCurrency} sent to driver`,
-      driverPhone
+      `Airtime API credited ${config.airtimeRewardAmount} ${config.airtimeCurrency} to driver`,
+      rewardPhone,
+      { outcome: airtime.outcome, api: airtime.result?.data }
     );
   } else {
     addEvent(
       shipment.id,
-      'airtime_skipped',
-      'No check-in before delivery — airtime not sent (set AIRTIME_REQUIRES_CHECKIN=false for sandbox)',
-      driverPhone
+      'airtime_failed',
+      'Airtime API did not credit — see /api/activity',
+      rewardPhone,
+      { outcome: airtime.outcome, api: airtime.result }
     );
+    await at.sendSms({
+      to: rewardPhone,
+      message: SMS.airtimeFailedNotify(shipment.id),
+      shipmentId: shipment.id,
+      reason: 'airtime_failed_notify',
+    });
   }
 
   return shipment;

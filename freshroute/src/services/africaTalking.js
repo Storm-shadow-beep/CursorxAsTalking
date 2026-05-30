@@ -94,23 +94,82 @@ async function startVoiceCall({ callTo, shipmentId, reason, message }) {
   return { status, result };
 }
 
+/**
+ * Parse Africa's Talking airtime API response to see if balance was actually credited.
+ */
+function parseAirtimeOutcome(airtimeResult) {
+  if (config.mockAt) {
+    return { credited: true, status: 'mocked', detail: 'AFRICASTALKING_MOCK=true' };
+  }
+
+  const { status, result } = airtimeResult;
+  if (status === 'failed' || !result?.ok) {
+    return {
+      credited: false,
+      status: 'failed',
+      detail: result?.error || 'Airtime API call failed',
+    };
+  }
+
+  const payload = result.data?.response ?? result.data;
+  const rows = payload?.responses;
+  if (Array.isArray(rows) && rows.length > 0) {
+    const row = rows[0];
+    const rowStatus = String(row.status || '').toLowerCase();
+    const credited =
+      rowStatus.includes('sent') ||
+      rowStatus === 'success' ||
+      rowStatus === 'queued';
+    return {
+      credited,
+      status: credited ? 'sent' : 'failed',
+      detail: row,
+      amountLabel: row.amount || null,
+    };
+  }
+
+  if (result.data?.ok === true) {
+    return { credited: true, status: 'sent', detail: result.data };
+  }
+
+  return { credited: true, status: 'sent', detail: payload };
+}
+
 async function sendAirtime({ phoneNumber, amount, currencyCode, shipmentId, reason }) {
+  const currency = currencyCode || config.airtimeCurrency;
   const result = await callBackend('/airtime/send', {
     phoneNumber,
     amount: String(amount),
-    currencyCode: currencyCode || config.airtimeCurrency,
+    currencyCode: currency,
   });
-  const status = config.mockAt ? 'mocked' : result.ok ? 'sent' : 'failed';
+
+  const outcome = parseAirtimeOutcome({
+    status: config.mockAt ? 'mocked' : result.ok ? 'sent' : 'failed',
+    result,
+  });
+
+  const activityStatus = config.mockAt
+    ? 'mocked'
+    : outcome.credited
+      ? 'sent'
+      : 'failed';
+
   logActivity({
     shipmentId,
     product: 'airtime',
     recipientPhone: phoneNumber,
-    summary: `${amount} ${currencyCode || config.airtimeCurrency}`,
-    status,
-    rawResponse: result,
+    summary: `${amount} ${currency}${outcome.amountLabel ? ` → ${outcome.amountLabel}` : ''}`,
+    status: activityStatus,
+    rawResponse: { api: result, outcome },
     reason,
   });
-  return { status, result };
+
+  return {
+    status: activityStatus,
+    credited: outcome.credited,
+    outcome,
+    result,
+  };
 }
 
 async function sendWhatsApp({ to, message, shipmentId, reason, waNumber }) {
@@ -182,6 +241,7 @@ module.exports = {
   sendBulkSms,
   startVoiceCall,
   sendAirtime,
+  parseAirtimeOutcome,
   sendWhatsApp,
   recordUssdInbound,
   logActivity,
